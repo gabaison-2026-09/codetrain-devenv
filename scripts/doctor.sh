@@ -114,17 +114,30 @@ fi
 
 echo
 echo "== ポート"
-# compose がまだ掴んでいないポートを、他のプロセスが使っていないか確認する。
+# 使いたいポートを、このプロジェクト以外のプロセスが握っていないか確認する。
+#
+# 判定の順番が大事: 先に「自分のコンテナが公開しているポートか」を見る。
+# docker-proxy は root プロセスなので、一般ユーザーの ss にはプロセス名が見えず、
+# リスナーの正体をプロセス名から判別することはできない。
 port_of() { sed -n "s/^$1=//p" .env 2>/dev/null | tail -1; }
+
+# このプロジェクトのコンテナが公開しているポートの一覧（":<port>->" の形で並ぶ）
+published="$(docker ps --filter label=com.docker.compose.project=codetrain \
+              --format '{{.Ports}}' 2>/dev/null || true)"
+
 check_port() {
   local name="$1" port="$2"
   [ -n "$port" ] || return 0
+
+  if echo "$published" | grep -q ":$port->"; then
+    pass "$name :$port は codetrain のコンテナが使用中"
+    return 0
+  fi
+
   local holder
-  holder="$(ss -lntpH "sport = :$port" 2>/dev/null | head -1)"
+  holder="$(ss -lntH "sport = :$port" 2>/dev/null | head -1)"
   if [ -z "$holder" ]; then
     pass "$name :$port は空いています"
-  elif echo "$holder" | grep -q 'docker\|com.docker'; then
-    pass "$name :$port は Docker が使用中（このプロジェクトの可能性が高い）"
   else
     fail "$name :$port を別のプロセスが使用中です。.env で変更してください（§11）"
     printf '        %s\n' "$holder"
@@ -133,6 +146,7 @@ check_port() {
 check_port postgres  "$(port_of POSTGRES_PORT)"
 check_port ministack "$(port_of MINISTACK_PORT)"
 check_port api       "$(port_of API_PORT)"
+check_port adminer   "$(port_of ADMINER_PORT)"
 check_port admin     3000
 
 echo

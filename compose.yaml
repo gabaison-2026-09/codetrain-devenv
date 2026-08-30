@@ -1,28 +1,33 @@
 # CodeTrain ローカル開発環境
 #
 # 設計: Document/LOCAL_DEV.md §4
-#   * profiles でトラックを切り替える（core / product / lab / tools）
-#   * Go（api / pipeline / migrate）は**ローカルでも必ずコンテナ**
+#   * Go（api / migrate）は**ローカルでも必ずコンテナ**
 #   * admin(Next.js) は **compose に含めない**。WSL ホストで `make dev-admin`
 #   * ポートは 0.0.0.0 にバインドする（127.0.0.1: を付けると Windows 側から届かない）
 #
+# **profiles は使わない。** 素の docker compose コマンドだけで操作できることを優先する。
+# profile を絞ると依存先（postgres 等）まで「未定義」になり、depends_on が壊れる。
+# `docker compose up -d` だけで、初期化（マイグレーション・シード・Ministack）まで完了する。
+#
+# Track A（pipeline / llm-proxy / sandbox-runner）は profile ではなく別ファイルにする。
+# 着手時に compose.lab.yaml を追加し、次のように重ねる:
+#   docker compose -f compose.yaml -f compose.lab.yaml up -d
+# こうすると pipeline を持っていない人の `docker compose up -d` は Track B だけを起動する
+# （LOCAL_DEV.md §3 の「Track B は Track A なしで完結する」を profile なしで保つ）。
+#
 # build context は隣のリポジトリを相対パスで指す（REPOSITORIES.md §2.2）。
-# 全リポジトリを揃える必要はない。profile で起動対象が絞られる。
 
 name: codetrain
 
 services:
   # ---------------------------------------------------------------------------
-  # core profile — 両トラック共通の土台
+  # 土台
   # ---------------------------------------------------------------------------
 
   postgres:
     # 本番の Aurora Serverless v2 (PostgreSQL) とメジャーバージョンを揃える。
     # Aurora 固有機能は使わない（LOCAL_DEV.md §4.2）。
     image: postgres:${POSTGRES_VERSION:-16}
-    # manual を含めているのは、migrate サービス（profile: manual）が
-    # depends_on で postgres を参照するため。同じ profile に居ないと解決できない。
-    profiles: ["core", "product", "lab", "all", "manual"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-codetrain}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-codetrain}
@@ -45,14 +50,13 @@ services:
   ministack:
     # LocalStack ではなく Ministack（MIT / 単一ポート 4566）。LOCAL_DEV.md §1。
     image: ministackorg/ministack:${MINISTACK_VERSION:-1.5}
-    profiles: ["core", "product", "lab", "all"]
     ports:
       - "${MINISTACK_PORT:-4566}:4566"
     environment:
       # S3 は既定で揮発する（S3_PERSIST=0）。コンテナを作り直すたびに
       # アップロード済みオブジェクトが消えると開発の邪魔になるため永続化する。
       # Cognito 側に相当する設定は無く、User Pool ID はコンテナ再作成で変わる
-      # （そのため make up-core は毎回 bootstrap-ministack.sh を流し直す）。
+      # （そのため aws-init が up のたびに走り直す）。
       S3_PERSIST: "1"
       S3_DATA_DIR: /data/s3
     volumes:
@@ -66,18 +70,54 @@ services:
       retries: 20
       start_period: 3s
 
+  # ---------------------------------------------------------------------------
+  # 初期化（ワンショット。up のたびに走り、終わったら exit 0 で消える）
+  # どちらも冪等なので、何度実行しても同じ状態に収束する。
+  # ---------------------------------------------------------------------------
+
+  # Ministack 上のリソース（S3 バケット・Cognito User Pool / App Client / テストユーザー）
+  # を作る。IaC（codetrain-infra）は本番専用と割り切り、ローカルはここに寄せる。
+  aws-init:
+    image: amazon/aws-cli:${AWS_CLI_VERSION:-2.32.9}
+    # 既定の entrypoint は aws 本体なので、スクリプトを実行するよう上書きする。
+    entrypoint: ["/bin/bash", "/scripts/bootstrap-ministack.sh"]
+    restart: "no"
+    # ホストユーザーで動かす。root のままだと .generated/cognito.env が root 所有になり、
+    # ホスト側から消せなくなる。UID/GID が 1000 でない環境は .env で上書きする。
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://ministack:4566}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-ap-northeast-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-dummy}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-dummy}
+      AWS_PAGER: ""
+      S3_BUCKET: ${S3_BUCKET:-codetrain-local}
+      COGNITO_TEST_PASSWORD: ${COGNITO_TEST_PASSWORD:-CodeTrain#Local1}
+    volumes:
+      - ./scripts:/scripts:ro
+      # Cognito の ID を .generated/cognito.env に書き出す（AUTH_MODE=cognito で使う）
+      - ./.generated:/out
+    depends_on:
+      ministack:
+        condition: service_healthy
+
   # マイグレーションとシード投入の実行主体。
   # 「core 以外がスキーマを変更しない」という規律をローカルでも守るため、
   # api からではなく必ずこのサービス経由で流す（LOCAL_DEV.md §10.2）。
   #
-  # profile を manual にしてあるので up では起動せず、make migrate / make seed から
-  # `docker compose run --rm migrate <cmd>` として使う。
-  migrate:
+  # 既定コマンドは seed（内部で up を実行してからシードを流す）。
+  # 個別に叩きたいときは:
+  #   docker compose run --rm db-init up
+  #   docker compose run --rm db-init down 1
+  #   docker compose run --rm db-init redo      # up → down -all → up の往復検証
+  #   docker compose run --rm db-init version
+  db-init:
     build:
       context: ../codetrain-core
       dockerfile: Dockerfile.migrate
     image: codetrain/migrator:dev
-    profiles: ["manual"]
+    command: ["seed"]
+    restart: "no"
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://codetrain:codetrain@postgres:5432/codetrain?sslmode=disable}
     depends_on:
@@ -85,7 +125,7 @@ services:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
-  # product profile — Track B
+  # アプリケーション
   # ---------------------------------------------------------------------------
 
   api:
@@ -93,7 +133,6 @@ services:
       context: ../codetrain-api
       dockerfile: Dockerfile.dev
     image: codetrain/api:dev
-    profiles: ["product", "all"]
     ports:
       - "${API_PORT:-8080}:8080"
     environment:
@@ -127,16 +166,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ministack:
-        condition: service_started
+      # 初期化が終わってから起動する。これにより `docker compose up -d` の直後に
+      # /v1/skills がシードを返せる状態になっている。
+      db-init:
+        condition: service_completed_successfully
+      aws-init:
+        condition: service_completed_successfully
 
-  # ---------------------------------------------------------------------------
-  # tools profile — 補助
-  # ---------------------------------------------------------------------------
-
+  # DB 閲覧用。軽量（~5MB）なので profile で出し入れせず常駐させる。
   adminer:
     image: adminer:5
-    profiles: ["tools"]
     ports:
       - "${ADMINER_PORT:-8081}:8080"
     environment:
@@ -144,11 +183,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-
-  # ---------------------------------------------------------------------------
-  # lab profile（Track A）は pipeline リポジトリ着手時に追加する。
-  #   pipeline / llm-proxy / sandbox-runner — LOCAL_DEV.md §6・§7
-  # ---------------------------------------------------------------------------
 
 volumes:
   pgdata:

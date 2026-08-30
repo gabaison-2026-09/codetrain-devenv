@@ -1,2 +1,5 @@
 .env
-.generated/
+
+# aws-init の出力先。ディレクトリ自体は .gitkeep で残す（compose のバインドマウント先）
+.generated/*
+!.generated/.gitkeep

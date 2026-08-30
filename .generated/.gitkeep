@@ -1,0 +1,3 @@
+このディレクトリは aws-init が cognito.env を書き出す場所です。
+Docker のバインドマウントは、ホスト側のディレクトリが無いと root 所有で作ってしまうため、
+.gitkeep を置いて Git で存在を保証しています（中身は .gitignore で除外）。
