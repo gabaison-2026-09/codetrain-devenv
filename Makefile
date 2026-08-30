@@ -105,9 +105,15 @@ up-tools: check-env ## adminer（DB 閲覧）を起動
 	$(COMPOSE) --profile tools up -d
 	@echo "adminer: http://localhost:$${ADMINER_PORT:-8081}"
 
+# profile を指定せずに down すると、profile 付きのサービスが対象から外れて
+# 何も停止されない（compose v2 の挙動）。"*" ですべての profile を対象にする。
 .PHONY: down
 down: ## 停止（データは残る）。admin は Ctrl-C で別途止める
-	$(COMPOSE) down --remove-orphans
+	$(COMPOSE) --profile "*" down --remove-orphans
+
+.PHONY: down-v
+down-v: ## 停止してボリュームも破棄（DB・S3・Go キャッシュがすべて消える）
+	$(COMPOSE) --profile "*" down --remove-orphans -v
 
 .PHONY: ps
 ps: ## 状態確認
