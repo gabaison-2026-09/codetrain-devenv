@@ -1,0 +1,58 @@
+# CodeTrain ローカル開発環境 — Track A（Content Lab）
+#
+# 設計: Document/LOCAL_DEV.md §4・§6
+#   * compose.yaml と**重ねて**使う（profiles は使わない）:
+#       docker compose -f compose.yaml -f compose.lab.yaml run --rm pipeline generate
+#   * これを持っていない人の `docker compose up -d` は Track B だけを起動する。
+#
+# 毎回 -f を 2 つ書くのが煩わしければ .env に:
+#   COMPOSE_FILE=compose.yaml:compose.lab.yaml
+#
+# pipeline は常駐サーバーではなく「サブコマンドを 1 回実行して終わる」バッチ
+# （DESIGN.md §7 の CronJob + Job）。`run --rm` で都度起動する。
+
+services:
+  # LLM 問題生成パイプライン（codetrain-pipeline）。
+  #   generate   : ポリシー駆動でバッチ生成 → status=needs_review で登録
+  #   regenerate : レビューで needs_edit になった問題を自動で作り直す
+  #   questions  : 一覧表示
+  #   approve/reject : admin 未起動時の CLI レビュー
+  pipeline:
+    build:
+      context: ../codetrain-pipeline
+      dockerfile: Dockerfile.dev
+    image: codetrain/pipeline:dev
+    restart: "no"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://codetrain:codetrain@postgres:5432/codetrain?sslmode=disable}
+      # LLM 呼び出しモード（LOCAL_DEV.md §7.1）。
+      #   replay（既定）: testdata/cassettes/ からのみ応答。ミスヒットはエラー。
+      #   record / live : 実 API。ANTHROPIC_API_KEY と --allow-llm-calls が必要。
+      LLM_MODE: ${LLM_MODE:-replay}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      CASSETTE_DIR: ${CASSETTE_DIR:-testdata/cassettes}
+      POLICY_PATH: ${POLICY_PATH:-policy/policy.yaml}
+      GEN_MAX_RETRIES: ${GEN_MAX_RETRIES:-3}
+      # private module（codetrain-core）取得用。今は go.mod の replace で隣を指すため未使用。
+      GOPRIVATE: ${GOPRIVATE:-github.com/gabaison-2026-09/*}
+      GOFLAGS: -buildvcs=false
+    volumes:
+      - ../codetrain-pipeline:/workspace/codetrain-pipeline
+      # core を **同じ相対関係で** マウントする（go.mod の replace ... => ../codetrain-core）。
+      - ../codetrain-core:/workspace/codetrain-core:ro
+      # module / ビルドキャッシュは Track B（api）と同じ named volume を共有する。
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+    working_dir: /workspace/codetrain-pipeline
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # マイグレーション・シードが終わってから動かす（question / skill_node / raw_source が要る）。
+      db-init:
+        condition: service_completed_successfully
+
+volumes:
+  gomodcache:
+  gobuildcache:

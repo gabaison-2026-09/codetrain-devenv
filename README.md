@@ -84,6 +84,30 @@ docker compose -f compose.yaml -f compose.lab.yaml up -d
 
 こうすれば、pipeline を持っていない人の `docker compose up -d` は Track B だけを起動する。
 
+### Track A の使い方（LLM 問題生成）
+
+```bash
+cd ~/codetrain && gh repo clone <org>/codetrain-pipeline   # core は取得済みの前提
+cd codetrain-devenv
+
+# 既定は replay モード（testdata/cassettes/ から再生。API キー不要・ネット不要）
+docker compose -f compose.yaml -f compose.lab.yaml run --rm \
+  -e POLICY_PATH=policy/policy.demo.yaml pipeline generate
+
+# 生成分は status=needs_review で入り、review_queue に未レビュー行ができる
+docker compose exec postgres psql -U codetrain -d codetrain \
+  -c "select status, count(*) from question group by status"
+
+# レビューで needs_edit にした問題を自動で作り直す
+docker compose -f compose.yaml -f compose.lab.yaml run --rm pipeline regenerate
+
+# admin を起動していないときの CLI レビュー
+docker compose -f compose.yaml -f compose.lab.yaml run --rm pipeline approve --id <uuid>
+```
+
+実 API で生成・カセット記録するときだけ `.env` に `ANTHROPIC_API_KEY` を入れ、
+`LLM_MODE=record`（または `live`）＋ `--allow-llm-calls` を付ける。
+
 ## ポートと Windows 境界
 
 Windows 側との境界を越えるのは **`api`(8080) と `admin`(3000) の2つだけ**。
@@ -106,5 +130,9 @@ Windows 側との境界を越えるのは **`api`(8080) と `admin`(3000) の2�
 
 ## いま作られていないもの
 
-- **Track A** — `compose.lab.yaml` と `codetrain-pipeline`（LOCAL_DEV.md §6・§7）。
+- **Track A の残り** — `llm-proxy` / `sandbox-runner` コンテナ（LOCAL_DEV.md §6.4・§7）。
+  記録再生は当面 `codetrain-pipeline` プロセス内で完結する（`testdata/cassettes/`）。
+  出力予測問題の実コード照合（`pipeline verify`）も未実装。
+- **GitHub 収集（ingest）** — PoC は LLM 直生成のみ。`raw_source` は固定ダミー行を指す。
 - **CI ワークフロー** — 各リポジトリを GitHub に push してから追加する。
+- **生成ポリシーの admin UI** — 当面は `codetrain-pipeline/policy/policy.yaml`。
