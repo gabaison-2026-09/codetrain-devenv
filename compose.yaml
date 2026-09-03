@@ -143,7 +143,6 @@ services:
       COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
       COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
-      REVIEWER_SUBS: ${REVIEWER_SUBS:-}
       # AWS SDK にはエンドポイントとダミー資格情報を環境変数で与える。
       # アプリコードにエミュレータ分岐は書かない（LOCAL_DEV.md §4.2）。
       AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://ministack:4566}
